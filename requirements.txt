@@ -3,6 +3,4 @@ yfinance
 pandas
 numpy
 requests
-beautifulsoup4
-plotly
-pytz
+ta
