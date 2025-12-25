@@ -288,9 +288,17 @@ if overlap:
 st.markdown(f"<div>{session_html}</div>", unsafe_allow_html=True)
 st.markdown("<br>", unsafe_allow_html=True)
 
-# --- DATA FETCHING ---
-strength_data, dxy_val = fetch_live_data()
-news_data = get_forex_factory_news()
+# --- DATA FETCHING (Safe Mode) ---
+try:
+    with st.spinner("Connecting to Market Data..."):
+        strength_data, dxy_val = fetch_live_data()
+        news_data = get_forex_factory_news()
+except:
+    # Fallback if Yahoo blocks the server
+    strength_data = {'USD': 0.1, 'EUR': 0.1, 'GBP': 0.1, 'JPY': 0.1, 'AUD': 0.1, 'CAD': 0.1}
+    dxy_val = 100.00
+    news_data = []
+    st.error("Market Data Connection Weak - Using Offline Mode")
 
 # --- MAIN GRID ---
 col_left, col_mid, col_right = st.columns([1, 2, 1])
