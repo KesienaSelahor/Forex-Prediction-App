@@ -1,9 +1,10 @@
 streamlit
 pandas
 numpy
-pytz
+yfinance
+plotly
 requests
 beautifulsoup4
-plotly
 google-generativeai
-yfinance
+pytz
+lxml
