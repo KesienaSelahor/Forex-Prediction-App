@@ -21,7 +21,7 @@ st.set_page_config(
     page_title="Forex Quant Terminal",
     layout="wide",
     page_icon="🦅",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded"
 )
 
 # Initialize Session State
