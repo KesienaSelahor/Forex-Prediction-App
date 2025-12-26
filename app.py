@@ -23,22 +23,18 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Initialize State
 if "data_loaded" not in st.session_state: st.session_state.data_loaded = False
 if "gemini_result" not in st.session_state: st.session_state.gemini_result = None
 if "selected_pair" not in st.session_state: st.session_state.selected_pair = "EURUSD"
 if "api_key" not in st.session_state: st.session_state.api_key = ""
 
 # ==========================================
-# 2. CSS (FIXED: Sidebar Button Visible)
+# 2. CSS STYLING
 # ==========================================
 st.markdown("""
 <style>
     .stApp { background-color: #09090b; color: #ffffff; font-family: 'Inter', sans-serif; }
-    
-    /* Removed the line that hid the header/sidebar button */
     footer {visibility: hidden;}
-    
     .quant-card { background-color: #111114; border: 1px solid #27272a; border-radius: 12px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1); }
     .session-badge { padding: 5px 10px; border-radius: 6px; font-size: 10px; font-weight: 900; text-transform: uppercase; display: inline-block; margin-right: 5px; }
     .session-london { background-color: #22c55e; color: black; }
@@ -55,20 +51,15 @@ st.markdown("""
     .news-item { padding: 10px; border-left: 3px solid #27272a; background-color: #18181b; margin-bottom: 8px; border-radius: 0 6px 6px 0; }
     .news-time { color: #ef4444; font-weight: 900; font-size: 10px; }
     .news-event { font-size: 11px; font-weight: 600; color: #e4e4e7; }
-    
     div.stButton > button { width: 100%; background-color: #2563eb; color: white; border: none; padding: 12px; border-radius: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: 1px; transition: all 0.3s; }
     div.stButton > button:hover { background-color: #1d4ed8; transform: scale(1.02); }
     div[data-testid="stMetricValue"] { font-family: monospace; font-weight: 700; color: #3b82f6; }
-    
-    /* Input Field Styling */
-    div[data-testid="stTextInput"] input { background-color: #18181b; color: white; border: 1px solid #3f3f46; }
-    
     @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); } 70% { box-shadow: 0 0 0 10px rgba(245, 158, 11, 0); } 100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); } }
 </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 3. UTILS
+# 3. UTILS & LOGIC
 # ==========================================
 CONSTANTS = {
     'MAJOR_PAIRS': ['EURUSD', 'GBPUSD', 'USDJPY', 'AUDUSD', 'USDCAD', 'USDCHF', 'XAUUSD'],
@@ -91,34 +82,61 @@ def get_active_sessions(hour_utc):
             if s['start'] <= hour_utc < s['end']: active.append(s['name'])
     return active
 
-@st.cache_data(ttl=600)
-def fetch_live_data():
-    try:
-        tickers = ["DX-Y.NYB", "EURUSD=X", "GBPUSD=X", "USDJPY=X", "AUDUSD=X", "USDCAD=X"]
-        data = yf.download(tickers, period="2d", interval="1d", progress=False, threads=False)
-        if data.empty: raise Exception("Block")
-        
-        def get_p(t, k='Close'): 
-            try: return data[k][t].iloc[-1]
-            except: return data[k].iloc[-1]
+# --- ROBUST FETCHERS (Stealth Mode) ---
 
-        dxy_c, dxy_o = get_p("DX-Y.NYB"), get_p("DX-Y.NYB", 'Open')
-        usd = ((dxy_c - dxy_o) / dxy_o) * 100
-        strength = {'USD': usd}
+def fetch_single_price(ticker):
+    """Fetches PREVIOUS CLOSE and CURRENT PRICE individually to calculate % change"""
+    try:
+        t = yf.Ticker(ticker)
+        # fast_info is lighter and often bypasses the bulk-download rate limit
+        current = t.fast_info['last_price']
+        prev = t.fast_info['previous_close']
         
-        pairs = {'EUR':'EURUSD=X', 'GBP':'GBPUSD=X', 'AUD':'AUDUSD=X', 'JPY':'USDJPY=X', 'CAD':'USDCAD=X'}
-        for c, t in pairs.items():
-            op, cl = get_p(t, 'Open'), get_p(t)
-            ch = ((cl - op) / op) * 100
-            strength[c] = (usd - ch) if c in ['JPY','CAD'] else (usd + ch)
-        return strength, dxy_c
+        if current is None or prev is None:
+            # Fallback to history if fast_info is empty
+            hist = t.history(period="2d")
+            current = hist['Close'].iloc[-1]
+            prev = hist['Close'].iloc[-2]
+            
+        change_pct = ((current - prev) / prev) * 100
+        return change_pct, current
     except:
-        return {'USD': 0.15, 'EUR': -0.12, 'GBP': 0.25, 'JPY': -0.40, 'AUD': 0.10, 'CAD': 0.05}, 103.50
+        return None, None
+
+@st.cache_data(ttl=300)
+def fetch_live_data():
+    """Fetches data sequentially to avoid Ban"""
+    
+    # 1. Get DXY First
+    dxy_change, dxy_price = fetch_single_price("DX-Y.NYB")
+    
+    if dxy_price is None:
+        raise Exception("LIVE DATA CONNECTION FAILED. Please try again in 1 minute.")
+
+    strength = {'USD': dxy_change}
+    
+    # 2. Get Pairs sequentially
+    pairs = {'EUR':'EURUSD=X', 'GBP':'GBPUSD=X', 'AUD':'AUDUSD=X', 'JPY':'USDJPY=X', 'CAD':'USDCAD=X'}
+    
+    for curr, ticker in pairs.items():
+        change, _ = fetch_single_price(ticker)
+        if change is None: change = 0.0 # Neutral if one pair fails
+        
+        # Logic: If XXX/USD goes up, XXX is Stronger than USD
+        # If USD/XXX goes up, USD is Stronger than XXX
+        if curr in ['JPY', 'CAD']: # USD is Base
+            strength[curr] = dxy_change - change
+        else: # USD is Quote
+            strength[curr] = dxy_change + change
+            
+        time.sleep(0.1) # Tiny pause to be polite to the server
+            
+    return strength, dxy_price
 
 @st.cache_data(ttl=900)
 def get_news():
     try:
-        r = requests.get("https://www.forexfactory.com/calendar?day=today", headers={'User-Agent':'Mozilla/5.0'}, timeout=1.5)
+        r = requests.get("https://www.forexfactory.com/calendar?day=today", headers={'User-Agent':'Mozilla/5.0'}, timeout=2.0)
         soup = BeautifulSoup(r.text, 'html.parser')
         evs = []
         for r in soup.find_all("tr", class_="calendar__row"):
@@ -128,7 +146,7 @@ def get_news():
                 e = r.find("td", class_="calendar__event").text.strip()
                 evs.append(f"{t} | {c} | {e}")
         return evs if evs else ["No High Impact News"]
-    except: return ["News Offline"]
+    except: return ["News Feed Offline"]
 
 def call_gemini(pair, strength, dxy, key):
     try:
@@ -143,19 +161,19 @@ def call_gemini(pair, strength, dxy, key):
 # 4. APP LAYOUT
 # ==========================================
 
-# --- NEW: API KEY INPUT ON MAIN SCREEN ---
-with st.expander("🔑 SYSTEM CREDENTIALS (API KEY)", expanded=not st.session_state.api_key):
-    st.session_state.api_key = st.text_input("Enter Google Gemini API Key:", value=st.session_state.api_key, type="password")
+# Settings
+with st.expander("🔑 SYSTEM SETTINGS (API KEY)", expanded=not st.session_state.api_key):
+    st.session_state.api_key = st.text_input("Enter Gemini API Key:", value=st.session_state.api_key, type="password")
     if st.button("RESET CONNECTION"):
         st.session_state.data_loaded = False
         st.rerun()
 
-# --- HEADER ---
+# Header
 c1, c2 = st.columns([3,1])
 with c1: st.markdown("### 🦅 FX-CORE QUANT TERMINAL")
 with c2: st.metric("LAGOS TIME", get_lagos_time().strftime('%H:%M'))
 
-# --- SESSIONS ---
+# Sessions
 h_utc = datetime.datetime.now(datetime.timezone.utc).hour
 active = get_active_sessions(h_utc)
 ovr = is_overlap(get_lagos_time().hour)
@@ -167,17 +185,20 @@ for s in CONSTANTS['SESSIONS']:
 if ovr: html += '<span class="session-badge session-overlap">⚡ KILL ZONE</span>'
 st.markdown(f"<div style='margin-bottom:20px'>{html}</div>", unsafe_allow_html=True)
 
-# --- LOADING GATE ---
+# Connection Gate
 if not st.session_state.data_loaded:
     st.info("System Standby. Click to Connect.")
     if st.button("🔌 CONNECT TO MARKETS"):
-        with st.spinner("Connecting..."):
-            st.session_state.strength, st.session_state.dxy = fetch_live_data()
-            st.session_state.news = get_news()
-            st.session_state.data_loaded = True
-            st.rerun()
+        with st.spinner("Connecting to Live Feeds..."):
+            try:
+                st.session_state.strength, st.session_state.dxy = fetch_live_data()
+                st.session_state.news = get_news()
+                st.session_state.data_loaded = True
+                st.rerun()
+            except Exception as e:
+                st.error(f"{e}")
 else:
-    # --- DASHBOARD ---
+    # Dashboard
     s_data = st.session_state.strength
     dxy_val = st.session_state.dxy
     news_data = st.session_state.news
@@ -197,11 +218,11 @@ else:
         st.metric("DXY INDEX", f"{dxy_val:.2f}", "Bullish" if s_data['USD']>0 else "Bearish")
         
         c_sel, c_run = st.columns(2)
-        with c_sel: st.session_state.selected_pair = st.selectbox("ASSET", CONSTANTS['MAJOR_PAIRS'])
+        with c_sel: st.session_state.selected_pair = st.selectbox("ASSET", CONSTANTS['MAJOR_PAIRS'], label_visibility="collapsed")
         with c_run:
             if st.button("RUN ANALYSIS ⚡"):
                 if st.session_state.api_key:
-                    with st.spinner("Analyzing..."):
+                    with st.spinner("Processing..."):
                         st.session_state.gemini_result = call_gemini(st.session_state.selected_pair, s_data, dxy_val, st.session_state.api_key)
                 else: st.error("ENTER API KEY ABOVE ⬆️")
 
@@ -217,10 +238,3 @@ else:
     with c_right:
         if st.session_state.gemini_result:
             sc = st.session_state.gemini_result.get('score', 50)
-            fig = go.Figure(go.Indicator(mode="gauge+number", value=sc, gauge={'axis': {'range': [0, 100]}, 'bar': {'color': "#2563eb"}, 'bgcolor': "#18181b", 'steps': [{'range': [0, 30], 'color': '#ef4444'}, {'range': [70, 100], 'color': '#22c55e'}]}))
-            fig.update_layout(height=180, margin=dict(l=10,r=10,t=10,b=10), paper_bgcolor='rgba(0,0,0,0)', font={'color': "white"})
-            st.plotly_chart(fig, use_container_width=True)
-        
-        st.markdown('<div class="quant-card"><h5>📰 NEWS</h5>', unsafe_allow_html=True)
-        for n in news_data: st.markdown(f'<div class="news-item"><div class="news-event">{n}</div></div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
